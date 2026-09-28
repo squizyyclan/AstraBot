@@ -20,16 +20,16 @@ const {
 } = require("discord.js");
 const fs = require("fs");
 const path = require("path");
-
+ 
 const TOKEN = process.env.DISCORD_TOKEN;
 const CLIENT_ID = process.env.CLIENT_ID;
 const GUILD_ID = process.env.GUILD_ID;
-
+ 
 if (!TOKEN || !CLIENT_ID || !GUILD_ID) {
   console.error("Missing DISCORD_TOKEN, CLIENT_ID or GUILD_ID.");
   process.exit(1);
 }
-
+ 
 const DATA = path.join(__dirname, "data.json");
 let db = {};
 if (fs.existsSync(DATA)) {
@@ -37,7 +37,9 @@ if (fs.existsSync(DATA)) {
 }
 if (!db.voiceOwners) db.voiceOwners = {};
 const emptyVoiceTimers = new Map();
-
+const zeitplanPending = new Map();
+const WEEKDAYS = ["Montag", "Dienstag", "Mittwoch", "Donnerstag", "Freitag", "Samstag", "Sonntag"];
+ 
 function save() {
   fs.writeFileSync(DATA, JSON.stringify(db, null, 2));
 }
@@ -55,7 +57,7 @@ function ok(interaction, perm) {
 function safeName(name) {
   return name.toLowerCase().replace(/[^\p{L}\p{N}\-_]/gu, "").slice(0, 80) || "channel";
 }
-
+ 
 function setVoiceOwner(channel, ownerId) {
   db.voiceOwners[channel.id] = {
     guildId: channel.guild.id,
@@ -63,39 +65,39 @@ function setVoiceOwner(channel, ownerId) {
   };
   save();
 }
-
+ 
 function removeVoiceOwner(channelId) {
   delete db.voiceOwners[channelId];
   save();
 }
-
+ 
 function getOwnedVoiceChannel(guild, userId) {
   const entry = Object.entries(db.voiceOwners).find(([, owner]) =>
     owner.guildId === guild.id && owner.ownerId === userId
   );
-
+ 
   if (!entry) return null;
-
+ 
   const channel = guild.channels.cache.get(entry[0]);
   if (!channel || channel.type !== ChannelType.GuildVoice) {
     removeVoiceOwner(entry[0]);
     return null;
   }
-
+ 
   return channel;
 }
-
+ 
 function clearVoiceDeletion(channelId) {
   const timer = emptyVoiceTimers.get(channelId);
   if (!timer) return;
   clearTimeout(timer);
   emptyVoiceTimers.delete(channelId);
 }
-
+ 
 function scheduleVoiceDeletion(channel) {
   if (!channel || channel.members.size > 0) return;
   clearVoiceDeletion(channel.id);
-
+ 
   const timer = setTimeout(async () => {
     emptyVoiceTimers.delete(channel.id);
     const current = channel.guild.channels.cache.get(channel.id);
@@ -104,10 +106,10 @@ function scheduleVoiceDeletion(channel) {
     removeVoiceOwner(channel.id);
     await current.delete().catch(() => {});
   }, 30000);
-
+ 
   emptyVoiceTimers.set(channel.id, timer);
 }
-
+ 
 function voicePanel(channel) {
   return {
     embeds: [
@@ -132,31 +134,31 @@ function voicePanel(channel) {
     ]
   };
 }
-
+ 
 const leadingEmojiPattern = /^((?:\p{Extended_Pictographic}|\p{Emoji_Presentation})(?:\uFE0F|\p{Emoji_Modifier}|\u200D(?:\p{Extended_Pictographic}|\p{Emoji_Presentation}))*)/u;
-
+ 
 function formatChannelName(name) {
   let channelName = name.trim();
   const alreadyFormatted = channelName.match(/^『([^』]+)』\s*(.*)$/u);
-
+ 
   if (alreadyFormatted) {
     const emoji = alreadyFormatted[1].trim();
     channelName = alreadyFormatted[2].trim();
     return emoji && channelName ? `『${emoji}』${channelName}` : null;
   }
-
+ 
   const emojiMatch = channelName.match(leadingEmojiPattern);
   if (!emojiMatch) return null;
-
+ 
   const emoji = emojiMatch[1];
   channelName = channelName
     .slice(emoji.length)
     .trim()
     .replace(/^[|｜]\s*/, "");
-
+ 
   return channelName ? `『${emoji}』${channelName}` : null;
 }
-
+ 
 const commands = [
   new SlashCommandBuilder().setName("help").setDescription("Zeigt alle Bot-Funktionen"),
   new SlashCommandBuilder().setName("setup").setDescription("Erstellt wichtige Bot-Kanäle und Grundkonfiguration"),
@@ -197,9 +199,15 @@ const commands = [
   new SlashCommandBuilder().setName("glowup").setDescription("Verpasst einem Textkanal ein komplettes Glow Up")
     .addChannelOption(o => o.setName("kanal").setDescription("Der zu verschönernde Textkanal").setRequired(false))
     .addStringOption(o => o.setName("name").setDescription("Neuer Name, optional mit Emoji").setRequired(false).setMaxLength(90))
-    .addStringOption(o => o.setName("beschreibung").setDescription("Beschreibung für Kanal und Info-Embed").setRequired(false).setMaxLength(1024))
+    .addStringOption(o => o.setName("beschreibung").setDescription("Beschreibung für Kanal und Info-Embed").setRequired(false).setMaxLength(1024)),
+  new SlashCommandBuilder().setName("zeitplan").setDescription("Erstellt einen Zeitplan für Videos oder Streams")
+    .addStringOption(o => o.setName("typ").setDescription("Video oder Stream").setRequired(true)
+      .addChoices({ name: "🎬 Video", value: "video" }, { name: "📺 Stream", value: "stream" }))
+    .addStringOption(o => o.setName("uhrzeit").setDescription("Uhrzeit, z. B. 18:00").setRequired(true).setMaxLength(5))
+    .addStringOption(o => o.setName("titel").setDescription("Titel oder Thema (optional)").setRequired(false).setMaxLength(100))
+    .addStringOption(o => o.setName("notiz").setDescription("Zusätzlicher Hinweis (optional)").setRequired(false).setMaxLength(500))
 ].map(c => c.toJSON());
-
+ 
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
@@ -208,12 +216,12 @@ const client = new Client({
   ],
   partials: [Partials.Channel, Partials.Message, Partials.GuildMember]
 });
-
+ 
 async function registerCommands() {
   const rest = new REST({ version: "10" }).setToken(TOKEN);
   await rest.put(Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID), { body: commands });
 }
-
+ 
 function log(guild, text) {
   const channelId = cfg(guild.id).logChannel;
   const channel = channelId ? guild.channels.cache.get(channelId) : null;
@@ -228,7 +236,7 @@ function log(guild, text) {
     }).catch(() => {});
   }
 }
-
+ 
 client.once("ready", async () => {
   console.log(`Logged in as ${client.user.tag}`);
   try {
@@ -238,7 +246,7 @@ client.once("ready", async () => {
     console.error("Command registration failed:", e);
   }
 });
-
+ 
 client.on("guildMemberAdd", async member => {
   const c = cfg(member.guild.id);
   if (!c.welcomeChannel) return;
@@ -251,7 +259,7 @@ client.on("guildMemberAdd", async member => {
     .setColor(0x9b5cff);
   channel.send({ embeds: [embed] }).catch(() => {});
 });
-
+ 
 client.on("channelCreate", async channel => {
   if (!channel.guild || !cfg(channel.guild.id).emojiFormat) return;
   if (channel.type !== ChannelType.GuildText && channel.type !== ChannelType.GuildVoice) return;
@@ -259,7 +267,7 @@ client.on("channelCreate", async channel => {
   if (!newName || channel.name === newName) return;
   await channel.setName(newName).catch(() => {});
 });
-
+ 
 client.on("voiceStateUpdate", async (oldState, newState) => {
   if (oldState.channelId && oldState.channelId !== newState.channelId) {
     const oldChannel = oldState.guild.channels.cache.get(oldState.channelId);
@@ -267,11 +275,11 @@ client.on("voiceStateUpdate", async (oldState, newState) => {
       scheduleVoiceDeletion(oldChannel);
     }
   }
-
+ 
   if (newState.channelId && db.voiceOwners[newState.channelId]) {
     clearVoiceDeletion(newState.channelId);
   }
-
+ 
   const c = cfg(newState.guild.id);
   if (!c.joinCreateChannel || newState.channelId !== c.joinCreateChannel) return;
   if (!newState.member) return;
@@ -296,24 +304,24 @@ client.on("voiceStateUpdate", async (oldState, newState) => {
     log(newState.guild, `${newState.member.user.tag} hat den Voice-Call ${ch.name} erstellt.`);
   } catch (e) { console.error("Join-to-create:", e); }
 });
-
+ 
 client.on("interactionCreate", async interaction => {
   if (interaction.isModalSubmit() && interaction.customId === "voice_rename_modal") {
     const voice = interaction.guild ? getOwnedVoiceChannel(interaction.guild, interaction.user.id) : null;
     if (!voice) return interaction.reply({ content: "❌ Du hast keinen eigenen Join-to-Create-Call.", ephemeral: true });
-
+ 
     const requestedName = interaction.fields.getTextInputValue("voice_name").trim();
     if (!requestedName) return interaction.reply({ content: "❌ Der Name darf nicht leer sein.", ephemeral: true });
-
+ 
     const newName = formatChannelName(requestedName) || requestedName;
     await voice.setName(newName.slice(0, 100));
     return interaction.reply({ content: `✅ Dein Call heißt jetzt ${voice}.`, ephemeral: true });
   }
-
+ 
   if (interaction.isStringSelectMenu() && interaction.customId === "voice_limit_select") {
     const voice = interaction.guild ? getOwnedVoiceChannel(interaction.guild, interaction.user.id) : null;
     if (!voice) return interaction.reply({ content: "❌ Du hast keinen eigenen Join-to-Create-Call.", ephemeral: true });
-
+ 
     const limit = Number(interaction.values[0]);
     await voice.setUserLimit(limit);
     return interaction.reply({
@@ -321,29 +329,60 @@ client.on("interactionCreate", async interaction => {
       ephemeral: true
     });
   }
-
+ 
   if (interaction.isUserSelectMenu() && interaction.customId === "voice_kick_select") {
     const voice = interaction.guild ? getOwnedVoiceChannel(interaction.guild, interaction.user.id) : null;
     if (!voice) return interaction.reply({ content: "❌ Du hast keinen eigenen Join-to-Create-Call.", ephemeral: true });
-
+ 
     const targetId = interaction.values[0];
     if (targetId === interaction.user.id) {
       return interaction.reply({ content: "❌ Du kannst dich nicht selbst entfernen.", ephemeral: true });
     }
-
+ 
     const target = voice.guild.members.cache.get(targetId);
     if (!target || !voice.members.has(targetId)) {
       return interaction.reply({ content: "❌ Dieses Mitglied ist nicht in deinem Call.", ephemeral: true });
     }
-
+ 
     await target.voice.disconnect("Vom Besitzer des Calls entfernt");
     return interaction.reply({ content: `✅ ${target.user.tag} wurde aus deinem Call entfernt.`, ephemeral: true });
   }
-
+ 
+  if (interaction.isStringSelectMenu() && interaction.customId === "zeitplan_days") {
+    const pending = zeitplanPending.get(interaction.user.id);
+    if (!pending) {
+      return interaction.update({ content: "❌ Diese Auswahl ist abgelaufen. Bitte führe /zeitplan erneut aus.", components: [] });
+    }
+    zeitplanPending.delete(interaction.user.id);
+ 
+    const days = interaction.values.map(Number).sort((a, b) => a - b).map(v => WEEKDAYS[v - 1]);
+    const isVideo = pending.typ === "video";
+    const embed = new EmbedBuilder()
+      .setTitle(`${isVideo ? "🎬 Video" : "📺 Stream"}-Zeitplan`)
+      .setColor(0x9b5cff)
+      .addFields(
+        { name: "📅 Tage", value: days.length === 7 ? "Täglich" : days.join(", ") },
+        { name: "🕒 Uhrzeit", value: `${pending.uhrzeit} Uhr` }
+      )
+      .setTimestamp();
+    if (pending.titel) embed.setDescription(`**${pending.titel}**`);
+    if (pending.notiz) embed.addFields({ name: "📝 Hinweis", value: pending.notiz });
+ 
+    try {
+      const target = interaction.guild?.channels.cache.get(pending.channelId) || interaction.channel;
+      await target.send({ embeds: [embed] });
+      log(interaction.guild, `${interaction.user.tag} hat einen ${isVideo ? "Video" : "Stream"}-Zeitplan gepostet.`);
+      return interaction.update({ content: "✅ Zeitplan wurde gepostet.", components: [] });
+    } catch (e) {
+      console.error("Zeitplan:", e);
+      return interaction.update({ content: "❌ Ich konnte den Zeitplan nicht senden. Prüfe meine Rechte im Kanal.", components: [] });
+    }
+  }
+ 
   if (interaction.isButton() && interaction.customId.startsWith("voice_")) {
     const voice = interaction.guild ? getOwnedVoiceChannel(interaction.guild, interaction.user.id) : null;
     if (!voice) return interaction.reply({ content: "❌ Du hast keinen eigenen Join-to-Create-Call.", ephemeral: true });
-
+ 
     if (interaction.customId === "voice_rename") {
       const modal = new ModalBuilder()
         .setCustomId("voice_rename_modal")
@@ -359,7 +398,7 @@ client.on("interactionCreate", async interaction => {
       modal.addComponents(new ActionRowBuilder().addComponents(input));
       return interaction.showModal(modal);
     }
-
+ 
     if (interaction.customId === "voice_limit") {
       const select = new StringSelectMenuBuilder()
         .setCustomId("voice_limit_select")
@@ -376,7 +415,7 @@ client.on("interactionCreate", async interaction => {
         ephemeral: true
       });
     }
-
+ 
     if (interaction.customId === "voice_kick") {
       const select = new UserSelectMenuBuilder()
         .setCustomId("voice_kick_select")
@@ -389,34 +428,34 @@ client.on("interactionCreate", async interaction => {
         ephemeral: true
       });
     }
-
+ 
     if (interaction.customId === "voice_lock") {
       await voice.permissionOverwrites.edit(interaction.guild.roles.everyone, { Connect: false });
       return interaction.reply({ content: "🔒 Dein Call ist jetzt gesperrt.", ephemeral: true });
     }
-
+ 
     if (interaction.customId === "voice_unlock") {
       await voice.permissionOverwrites.edit(interaction.guild.roles.everyone, { Connect: null });
       return interaction.reply({ content: "🔓 Dein Call ist wieder offen.", ephemeral: true });
     }
-
+ 
     if (interaction.customId === "voice_hide") {
       await voice.permissionOverwrites.edit(interaction.guild.roles.everyone, { ViewChannel: false });
       return interaction.reply({ content: "🙈 Dein Call ist jetzt unsichtbar.", ephemeral: true });
     }
-
+ 
     if (interaction.customId === "voice_show") {
       await voice.permissionOverwrites.edit(interaction.guild.roles.everyone, { ViewChannel: null });
       return interaction.reply({ content: "👀 Dein Call ist wieder sichtbar.", ephemeral: true });
     }
-
+ 
     if (interaction.customId === "voice_delete") {
       removeVoiceOwner(voice.id);
       await voice.delete();
       return interaction.reply({ content: "🗑️ Dein Call wurde gelöscht.", ephemeral: true });
     }
   }
-
+ 
   if (interaction.isButton()) {
     if (interaction.customId === "ticket_create") {
       const guild = interaction.guild, c = cfg(guild.id);
@@ -446,20 +485,20 @@ client.on("interactionCreate", async interaction => {
       return;
     }
   }
-
+ 
   if (!interaction.isChatInputCommand()) return;
   const { commandName, guild, member, channel } = interaction;
-
+ 
   try {
     if (commandName === "help") {
       return interaction.reply({ embeds: [new EmbedBuilder().setTitle("🤖 Lilabels Bot").setDescription(
         "**Moderation:** `/clear` `/kick` `/ban` `/timeout` `/warn` `/warnings`\n" +
-        "**Community:** `/announce` `/poll` `/say`\n" +
+        "**Community:** `/announce` `/poll` `/say` `/zeitplan`\n" +
         "**Channels:** `/lock` `/unlock` `/slowmode` `/format` `/glowup`\n" +
         "**System:** `/setup` `/config` `/setlogs` `/ticket` `/joincreate` `/voicepanel`"
       ).setColor(0x9b5cff)] });
     }
-
+ 
     if (commandName === "setup") {
       if (!ok(interaction, PermissionsBitField.Flags.ManageGuild)) return interaction.reply({ content: "❌ Du brauchst Server verwalten.", ephemeral: true });
       const category = await guild.channels.create({ name: "🎫｜SUPPORT", type: ChannelType.GuildCategory }).catch(() => null);
@@ -472,7 +511,7 @@ client.on("interactionCreate", async interaction => {
       save();
       return interaction.reply("✅ Grundsetup abgeschlossen. Ein Ticket-Bereich wurde erstellt.");
     }
-
+ 
     if (commandName === "setlogs") {
       if (!ok(interaction, PermissionsBitField.Flags.ManageGuild)) {
         return interaction.reply({ content: "❌ Du brauchst die Berechtigung „Server verwalten“.", ephemeral: true });
@@ -480,19 +519,19 @@ client.on("interactionCreate", async interaction => {
       if (channel.type !== ChannelType.GuildText) {
         return interaction.reply({ content: "❌ Führe den Befehl in einem Textkanal aus.", ephemeral: true });
       }
-
+ 
       cfg(guild.id).logChannel = channel.id;
       save();
       return interaction.reply(`✅ Alle Bot-Logs werden ab jetzt in ${channel} geschrieben.`);
     }
-
+ 
     if (commandName === "config") {
       const c = cfg(guild.id);
       return interaction.reply({ ephemeral: true, content:
         `⚙️ **Konfiguration**\nWelcome: ${c.welcomeChannel ? `<#${c.welcomeChannel}>` : "nicht gesetzt"}\nLogs: ${c.logChannel ? `<#${c.logChannel}>` : "nicht gesetzt"}\nTicket-Kategorie: ${c.ticketCategory ? `<#${c.ticketCategory}>` : "nicht gesetzt"}\nJoin-to-Create: ${c.joinCreateChannel ? `<#${c.joinCreateChannel}>` : "nicht gesetzt"}\nEmoji-Format: ${c.emojiFormat ? "an" : "aus"}`
       });
     }
-
+ 
     if (commandName === "clear") {
       if (!ok(interaction, PermissionsBitField.Flags.ManageMessages)) return interaction.reply({ content: "❌ Keine Berechtigung.", ephemeral: true });
       const n = interaction.options.getInteger("anzahl");
@@ -501,12 +540,12 @@ client.on("interactionCreate", async interaction => {
       await interaction.editReply(`🧹 ${messages.size} Nachrichten gelöscht.`);
       return;
     }
-
+ 
     if (["kick", "ban", "timeout", "warn", "warnings"].includes(commandName)) {
       const user = interaction.options.getUser("mitglied");
       const target = await guild.members.fetch(user.id).catch(() => null);
       if (!target && commandName !== "warnings") return interaction.reply({ content: "❌ Mitglied nicht gefunden.", ephemeral: true });
-
+ 
       if (commandName === "kick") {
         if (!ok(interaction, PermissionsBitField.Flags.KickMembers)) return interaction.reply({ content: "❌ Keine Kick-Berechtigung.", ephemeral: true });
         if (!target.kickable) return interaction.reply({ content: "❌ Ich kann dieses Mitglied nicht kicken.", ephemeral: true });
@@ -542,14 +581,14 @@ client.on("interactionCreate", async interaction => {
         return interaction.reply({ ephemeral: true, content: list.length ? list.map((w, i) => `${i + 1}. ${w.reason}`).join("\n") : "Keine Verwarnungen." });
       }
     }
-
+ 
     if (commandName === "announce") {
       if (!ok(interaction, PermissionsBitField.Flags.ManageGuild)) return interaction.reply({ content: "❌ Keine Berechtigung.", ephemeral: true });
       const text = interaction.options.getString("text");
       await interaction.reply({ content: "✅ Gesendet.", ephemeral: true });
       return channel.send({ embeds: [new EmbedBuilder().setTitle("📢 Ankündigung").setDescription(text).setColor(0x9b5cff).setTimestamp()] });
     }
-
+ 
     if (commandName === "poll") {
       const q = interaction.options.getString("frage");
       const msg = await channel.send({ embeds: [new EmbedBuilder().setTitle("📊 Umfrage").setDescription(q).setColor(0x9b5cff)] });
@@ -557,35 +596,35 @@ client.on("interactionCreate", async interaction => {
       await msg.react("👎");
       return interaction.reply({ content: "✅ Umfrage erstellt.", ephemeral: true });
     }
-
+ 
     if (commandName === "say") {
       if (!ok(interaction, PermissionsBitField.Flags.ManageMessages)) return interaction.reply({ content: "❌ Keine Berechtigung.", ephemeral: true });
       const text = interaction.options.getString("text");
       await interaction.reply({ content: "✅", ephemeral: true });
       return channel.send(text);
     }
-
+ 
     if (commandName === "lock" || commandName === "unlock") {
       if (!ok(interaction, PermissionsBitField.Flags.ManageChannels)) return interaction.reply({ content: "❌ Keine Berechtigung.", ephemeral: true });
       const deny = commandName === "lock";
       await channel.permissionOverwrites.edit(guild.roles.everyone, { SendMessages: deny });
       return interaction.reply(deny ? "🔒 Kanal gesperrt." : "🔓 Kanal entsperrt.");
     }
-
+ 
     if (commandName === "slowmode") {
       if (!ok(interaction, PermissionsBitField.Flags.ManageChannels)) return interaction.reply({ content: "❌ Keine Berechtigung.", ephemeral: true });
       const sec = interaction.options.getInteger("sekunden");
       await channel.setRateLimitPerUser(sec);
       return interaction.reply(`🐢 Slowmode: ${sec} Sekunden.`);
     }
-
+ 
     if (commandName === "ticket") {
       if (!ok(interaction, PermissionsBitField.Flags.ManageChannels)) return interaction.reply({ content: "❌ Keine Berechtigung.", ephemeral: true });
       const row = new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId("ticket_create").setLabel("Ticket erstellen").setEmoji("🎫").setStyle(ButtonStyle.Primary));
       await channel.send({ embeds: [new EmbedBuilder().setTitle("🎫 Support").setDescription("Klicke unten, um ein privates Ticket zu erstellen.").setColor(0x9b5cff)], components: [row] });
       return interaction.reply({ content: "✅ Ticket-Panel erstellt.", ephemeral: true });
     }
-
+ 
     if (commandName === "joincreate") {
       if (!ok(interaction, PermissionsBitField.Flags.ManageChannels)) return interaction.reply({ content: "❌ Keine Berechtigung.", ephemeral: true });
       if (channel.type !== ChannelType.GuildVoice) return interaction.reply({ content: "❌ Nutze den Befehl in einem Voice-Channel.", ephemeral: true });
@@ -595,14 +634,14 @@ client.on("interactionCreate", async interaction => {
       save();
       return interaction.reply(`🔊 ${channel} ist jetzt dein Join-to-Create-Kanal.`);
     }
-
+ 
     if (commandName === "voicepanel") {
       const voice = getOwnedVoiceChannel(guild, interaction.user.id);
       if (!voice) return interaction.reply({ content: "❌ Du hast keinen eigenen Join-to-Create-Call.", ephemeral: true });
       await voice.send(voicePanel(voice));
       return interaction.reply({ content: `✅ Das Verwaltungs-Panel wurde in ${voice} gepostet.`, ephemeral: true });
     }
-
+ 
     if (commandName === "format") {
       if (!ok(interaction, PermissionsBitField.Flags.ManageChannels)) return interaction.reply({ content: "❌ Keine Berechtigung.", ephemeral: true });
       const target = interaction.options.getChannel("kanal") || channel;
@@ -611,17 +650,54 @@ client.on("interactionCreate", async interaction => {
       await target.setName(newName);
       return interaction.reply(`✅ ${target} formatiert.`);
     }
-
+ 
+    if (commandName === "zeitplan") {
+      if (!isStaff(member)) return interaction.reply({ content: "❌ Nur das Team kann Zeitpläne erstellen.", ephemeral: true });
+ 
+      const typ = interaction.options.getString("typ");
+      const timeMatch = interaction.options.getString("uhrzeit").trim().match(/^([01]?\d|2[0-3])[:.]([0-5]\d)$/);
+      if (!timeMatch) {
+        return interaction.reply({ content: "❌ Bitte gib die Uhrzeit im Format HH:MM an, z. B. 18:00.", ephemeral: true });
+      }
+ 
+      const entry = {
+        typ,
+        uhrzeit: `${timeMatch[1].padStart(2, "0")}:${timeMatch[2]}`,
+        titel: interaction.options.getString("titel")?.trim() || null,
+        notiz: interaction.options.getString("notiz")?.trim() || null,
+        channelId: channel.id
+      };
+      zeitplanPending.set(interaction.user.id, entry);
+      setTimeout(() => {
+        if (zeitplanPending.get(interaction.user.id) === entry) zeitplanPending.delete(interaction.user.id);
+      }, 5 * 60 * 1000);
+ 
+      const select = new StringSelectMenuBuilder()
+        .setCustomId("zeitplan_days")
+        .setPlaceholder("Wähle die Tage aus")
+        .setMinValues(1)
+        .setMaxValues(7)
+        .addOptions(WEEKDAYS.map((name, i) =>
+          new StringSelectMenuOptionBuilder().setLabel(name).setValue(String(i + 1))
+        ));
+ 
+      return interaction.reply({
+        content: `${typ === "video" ? "🎬 Video" : "📺 Stream"} um ${entry.uhrzeit} Uhr – an welchen Tagen?`,
+        components: [new ActionRowBuilder().addComponents(select)],
+        ephemeral: true
+      });
+    }
+ 
     if (commandName === "glowup") {
       if (!ok(interaction, PermissionsBitField.Flags.ManageChannels)) {
         return interaction.reply({ content: "❌ Du brauchst die Berechtigung „Kanäle verwalten“.", ephemeral: true });
       }
-
+ 
       const target = interaction.options.getChannel("kanal") || channel;
       if (!target || ![ChannelType.GuildText, ChannelType.GuildAnnouncement].includes(target.type)) {
         return interaction.reply({ content: "❌ `/glowup` funktioniert nur in Text- oder Ankündigungskanälen.", ephemeral: true });
       }
-
+ 
       const requestedName = interaction.options.getString("name")?.trim();
       const currentBaseName = target.name.replace(/^『[^』]+』\s*/u, "").trim();
       const nameSource = requestedName || currentBaseName;
@@ -629,10 +705,10 @@ client.on("interactionCreate", async interaction => {
       if (!formattedName) {
         return interaction.reply({ content: "❌ Der Kanalname konnte nicht formatiert werden.", ephemeral: true });
       }
-
+ 
       const requestedDescription = interaction.options.getString("beschreibung")?.trim();
       const description = (requestedDescription || target.topic || `✨ Willkommen in ${target}! Bitte bleibt freundlich und respektvoll.`).slice(0, 1024);
-
+ 
       await target.setName(formattedName.slice(0, 100));
       await target.setTopic(description);
       await target.permissionOverwrites.edit(guild.roles.everyone, {
@@ -651,7 +727,7 @@ client.on("interactionCreate", async interaction => {
             .setTimestamp()
         ]
       });
-
+ 
       log(guild, `${interaction.user.tag} hat ${target.name} ein Channel-Glow-Up gegeben.`);
       return interaction.reply({ content: `✨ ${target} hat jetzt ein Glow Up bekommen.`, ephemeral: true });
     }
@@ -662,8 +738,8 @@ client.on("interactionCreate", async interaction => {
     }
   }
 });
-
+ 
 client.on("error", console.error);
 process.on("unhandledRejection", console.error);
-
+ 
 client.login(TOKEN);
